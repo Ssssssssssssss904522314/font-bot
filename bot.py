@@ -123,14 +123,30 @@ def main():
     if not token:
         raise RuntimeError("BOT_TOKEN environment variable is not set")
 
+    port = int(os.environ.get("PORT", "10000"))
+    base_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not base_url:
+        raise RuntimeError("RENDER_EXTERNAL_URL is not available")
+
+    webhook_url = f"{base_url.rstrip('/')}/telegram"
+
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(help_button, pattern="^help$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(error_handler)
 
-    print("Fonty bot started")
-    app.run_polling(drop_pending_updates=True)
+    print(f"Fonty bot started on port {port}")
+    print(f"Webhook URL: {webhook_url}")
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path="telegram",
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 if __name__ == "__main__":
     main()
