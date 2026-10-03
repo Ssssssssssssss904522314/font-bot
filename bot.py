@@ -194,6 +194,15 @@ def get_exceptions():
         ).fetchall()
 
 
+def find_user_by_username(username):
+    username = username.lstrip("@").lower()
+    with DB_LOCK, db() as conn:
+        return conn.execute(
+            "SELECT user_id FROM users WHERE lower(username)=?",
+            (username,),
+        ).fetchone()
+
+
 def is_admin(user):
     username = (user.username or "").lstrip("@").lower()
     return user.id in ADMIN_IDS or username in ADMIN_USERNAMES
@@ -640,14 +649,14 @@ async def handle_admin_action(update, context, action):
             await update.message.reply_text("❌ Укажи @username.")
             return
 
-        try:
-            chat = await context.bot.get_chat("@" + username)
-            target_id = chat.id
-        except TelegramError:
+        row = find_user_by_username(username)
+        if not row:
             await update.message.reply_text(
-                "❌ Не удалось найти пользователя. Он должен хотя бы один раз открыть этого бота."
+                "❌ Пользователь не найден в базе бота. "
+                "Пусть сначала нажмёт /start, затем добавь его в исключения."
             )
             return
+        target_id = row["user_id"]
 
         add_exception(target_id, username)
         ADMIN_ACTIONS.pop(user.id, None)
@@ -732,7 +741,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
-    app.add_handler(CommandHandler("cancel", lambda update, context: cancel_command(update, context)))
+    app.add_handler(CommandHandler("cancel", cancel_command))
 
     app.add_handler(CallbackQueryHandler(check_subs, pattern="^check_subs$"))
     app.add_handler(CallbackQueryHandler(font_button, pattern="^font:"))
