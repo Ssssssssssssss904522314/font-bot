@@ -4,7 +4,7 @@ import sqlite3
 import logging
 from threading import Lock
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import (
     Application,
@@ -12,6 +12,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
+    PreCheckoutQueryHandler,
     filters,
 )
 
@@ -32,6 +33,9 @@ ADMIN_IDS = {
 
 # Per-admin temporary action. The important data itself is stored in SQLite.
 ADMIN_ACTIONS = {}
+
+PREMIUM_STARS = int(os.environ.get("PREMIUM_STARS", "150"))
+PREMIUM_DAYS = 365
 
 # Unicode alphabets
 SETS = {
@@ -103,6 +107,14 @@ def init_db():
             """CREATE TABLE IF NOT EXISTS exceptions (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS premium (
+                user_id INTEGER PRIMARY KEY,
+                expires_at INTEGER NOT NULL,
+                telegram_payment_charge_id TEXT,
+                updated_at INTEGER NOT NULL
             )"""
         )
         conn.commit()
@@ -206,6 +218,94 @@ def find_user_by_username(username):
 def is_admin(user):
     username = (user.username or "").lstrip("@").lower()
     return user.id in ADMIN_IDS or username in ADMIN_USERNAMES
+
+
+def set_premium(user_id, charge_id, days=PREMIUM_DAYS):
+    import time
+    now = int(time.time())
+    with DB_LOCK, db() as conn:
+        row = conn.execute("SELECT expires_at FROM premium WHERE user_id=?", (user_id,)).fetchone()
+        base = max(now, int(row["expires_at"])) if row else now
+        expires_at = base + days * 86400
+        conn.execute(
+            """INSERT INTO premium(user_id, expires_at, telegram_payment_charge_id, updated_at)
+               VALUES(?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 expires_at=excluded.expires_at,
+                 telegram_payment_charge_id=excluded.telegram_payment_charge_id,
+                 updated_at=excluded.updated_at""",
+            (user_id, expires_at, charge_id, now),
+        )
+        conn.commit()
+    return expires_at
+
+
+def premium_expires_at(user_id):
+    with DB_LOCK, db() as conn:
+        row = conn.execute("SELECT expires_at FROM premium WHERE user_id=?", (user_id,)).fetchone()
+        return int(row["expires_at"]) if row else None
+
+
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    save_user(user)
+    expires = premium_expires_at(user.id)
+    text = "⭐ <b>Kilizix AI Premium</b>\n\n"
+    if expires and expires > __import__("time").time():
+        import datetime
+        date = datetime.datetime.fromtimestamp(expires).strftime("%d.%m.%Y")
+        text += f"У тебя уже есть Premium до <b>{date}</b>.\n\n"
+    text += f"Год Premium — <b>{PREMIUM_STARS} ⭐</b>.\nПосле успешной оплаты Premium будет активирован на 365 дней."
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"⭐ Купить Premium — {PREMIUM_STARS} Stars", callback_data="buy_premium")]])
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await context.bot.send_invoice(
+        chat_id=query.from_user.id,
+        title="Kilizix AI Premium",
+        description="Premium-доступ к Kilizix AI на 365 дней.",
+        payload=f"kilizix_premium_{query.from_user.id}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice("Premium на 1 год", PREMIUM_STARS)],
+        start_parameter="kilizix-premium",
+    )
+
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    if query.currency != "XTR" or query.total_amount != PREMIUM_STARS:
+        await query.answer(ok=False, error_message="Сумма счёта изменилась. Создай новый счёт через /premium.")
+        return
+    await query.answer(ok=True)
+
+
+async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    payment = update.message.successful_payment
+    user = update.effective_user
+    expires_at = set_premium(user.id, payment.telegram_payment_charge_id, PREMIUM_DAYS)
+    import datetime
+    date = datetime.datetime.fromtimestamp(expires_at).strftime("%d.%m.%Y")
+    await update.message.reply_text(
+        "✅ <b>Оплата получена!</b>\n\n"
+        f"⭐ Kilizix AI Premium активирован до <b>{date}</b>.\n"
+        f"Платёж: <code>{html.escape(payment.telegram_payment_charge_id)}</code>\n\n"
+        "Если возникла проблема с оплатой, используй /paysupport.",
+        parse_mode="HTML",
+    )
+
+
+async def paysupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "💳 <b>Поддержка по оплате</b>\n\n"
+        "Если вопрос связан с оплатой Premium, напиши: @dalk_angel\n"
+        "Укажи дату платежа, сумму в Stars и ID платежа.\n\n"
+        "Не отправляй пароль, коды подтверждения, CVV или полный номер карты.",
+        parse_mode="HTML",
+    )
 
 
 def translate(text, style):
@@ -347,6 +447,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("✨ Как пользоваться", callback_data="help")],
+        [InlineKeyboardButton("⭐ Купить Premium", callback_data="buy_premium")],
     ]
     if is_admin(user):
         keyboard.append([InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin")])
@@ -480,6 +581,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=admin_keyboard(),
     )
+
+
+async def premium_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await buy_premium(update, context)
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -750,9 +855,15 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("id", id_command))
+    app.add_handler(CommandHandler("premium", premium_command))
+    app.add_handler(CommandHandler("paysupport", paysupport))
     app.add_handler(CommandHandler("cancel", cancel_command))
 
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+
     app.add_handler(CallbackQueryHandler(check_subs, pattern="^check_subs$"))
+    app.add_handler(CallbackQueryHandler(premium_button, pattern="^buy_premium$"))
     app.add_handler(CallbackQueryHandler(font_button, pattern="^font:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(admin|adm:)"))
     app.add_handler(CallbackQueryHandler(help_button, pattern="^help$"))
