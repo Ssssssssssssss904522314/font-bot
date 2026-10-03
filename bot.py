@@ -462,6 +462,14 @@ async def check_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"🆔 Твой Telegram ID: <code>{user.id}</code>",
+        parse_mode="HTML",
+    )
+
+
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user):
@@ -741,6 +749,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
 
     app.add_handler(CallbackQueryHandler(check_subs, pattern="^check_subs$"))
